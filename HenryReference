@@ -1,0 +1,329 @@
+package my.hmpoc.android;
+
+import java.io.File;
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import org.apache.http.HttpResponse;
+import org.apache.http.NameValuePair;
+import org.apache.http.client.ClientProtocolException;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.entity.UrlEncodedFormEntity;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.message.BasicNameValuePair;
+import org.apache.http.protocol.HTTP;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
+import android.os.AsyncTask;
+import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.util.Log;
+import android.view.View;
+import android.view.View.OnClickListener;
+import android.widget.AdapterView;
+import android.widget.AdapterView.OnItemClickListener;
+import android.widget.ArrayAdapter;
+import android.widget.AutoCompleteTextView;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.ImageButton;
+import android.widget.RatingBar;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.yum.app.R;
+import com.yum.app.model.FoodItem;
+import com.yum.app.model.RestaurantDetail;
+import com.yum.app.model.SearchParams;
+import com.yum.app.util.InternetRequestUtils;
+import com.yum.app.util.S3ImageUtil;
+import com.yum.app.util.facebook.FacebookConnector;
+
+public class AddReview extends AuthenticatedActivity {
+	AutoCompleteTextView restaurantName;
+	ArrayAdapter<PairedIdName> restaurantNameAdaptor;
+	AutoCompleteTextView foodName;
+	ArrayAdapter<PairedIdName> foodNameAdaptor;
+	EditText comment;
+	Button submitBottomButton;
+	RatingBar ratingBar;
+	private SubmitReviewListener submitReviewListener;
+	int foodId;
+	int restaurantId;
+	ImageButton foodImage;
+	private static final int IMAGE_INTENT_REQUEST_CODE = 10;
+	private String imageLocation;
+	
+    @Override
+	public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+    }
+    
+    private void invokeCamera() {
+        File file = new File(Environment.getExternalStorageDirectory(), UUID.randomUUID().toString() + ".png");
+        assert !file.exists();
+        imageLocation = file.getAbsolutePath();
+        
+        Uri outputFileUri = Uri.fromFile(file);
+        Intent intent = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+        intent.putExtra(MediaStore.EXTRA_OUTPUT, outputFileUri);
+        startActivityForResult(intent, IMAGE_INTENT_REQUEST_CODE);
+    }
+    
+	@Override
+	public void onActivityResult(int requestCode, int resultCode, Intent data) {
+		super.onActivityResult(requestCode, resultCode, data);
+		if (resultCode == Activity.RESULT_OK && requestCode == IMAGE_INTENT_REQUEST_CODE) {
+			onPicTaken();
+		}
+	}
+    
+    private void onPicTaken() {
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = 4;
+        Bitmap bitmap = BitmapFactory.decodeFile(imageLocation, options);
+        foodImage.setImageBitmap(bitmap);
+	}
+
+	private class UpdateRestaurantNameSuggestions extends AsyncTask<String, Void, Map<Integer, String>> {
+        @Override
+        protected Map<Integer, String> doInBackground(String... params) {
+        	assert params.length > 0;
+        	Map<String, String> requestParams = new HashMap<String, String>();
+        	requestParams.put("latitude", "37.793576");
+        	requestParams.put("longitude", "-122.414442");
+        	SearchParams searchParams = new SearchParams();
+        	searchParams.setQuery(params[0]);
+        	requestParams.put(SearchParams.SEARCH_PARAMS, searchParams.toString());
+        	
+            String nearbyRestaurantsJsonString = InternetRequestUtils.doGet("yummie/api/v1/yummie/nearbyRestaurants/",
+            		requestParams);
+            
+            Map<Integer, String> suggestions = new HashMap<Integer, String>();
+            
+            if (nearbyRestaurantsJsonString != null &&
+            		!"null\n".equals(nearbyRestaurantsJsonString)) {
+	            try {
+					JSONArray restaurants = new JSONArray(nearbyRestaurantsJsonString);
+					if (restaurants != null) {
+						for (int i = 0; i < restaurants.length(); i++) {
+							JSONObject restaurant = restaurants.getJSONObject(i);
+							// Reverse mapping so that id can be retrieved on select from the name
+							suggestions.put(restaurant.getInt("restaurantId"), restaurant.getString("restaurantName"));
+						}
+					}
+				} catch (JSONException e) {
+					e.printStackTrace();
+				}
+            }
+            
+             return suggestions;
+        }
+
+        @Override
+        protected void onPostExecute(Map<Integer, String> result) {
+        	if (result.keySet().size() > 0) {
+        		restaurantNameAdaptor.clear();
+	            for (Integer key : result.keySet()) {
+	                restaurantNameAdaptor.add(new PairedIdName(key, result.get(key)));
+	            }
+            	restaurantNameAdaptor.notifyDataSetChanged();
+            }
+        }
+    }
+
+    private class UpdateFoodNameSuggestions extends AsyncTask<Integer, Void, Map<Integer, String>> {
+        @Override
+        protected Map<Integer, String> doInBackground(Integer... params) {
+        	assert params.length > 0;
+        	
+            String restaurantDetailJsonData = InternetRequestUtils.doGet("yummie/api/v1/yummie/restaurant/" + params[0],
+            		new HashMap<String, String>());
+            Map<Integer, String> suggestions = new HashMap<Integer, String>();
+            if (restaurantDetailJsonData != null &&
+            		!"null\n".equals(restaurantDetailJsonData)) {
+            	GsonBuilder gsonb = new GsonBuilder();
+                Gson gson = gsonb.create();
+                JSONObject restaurantJsonObj;
+                try {
+                    restaurantJsonObj = new JSONObject(restaurantDetailJsonData);
+                    RestaurantDetail restaurantDetail = gson.fromJson(restaurantJsonObj.toString(), RestaurantDetail.class);
+                    List<FoodItem> foods = restaurantDetail.getTopFoods();
+                    for (FoodItem food : foods) {
+                    	suggestions.put(food.getId(), food.getName());
+                    }
+                }
+                catch(Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            
+            return suggestions;
+        }
+
+        @Override
+        protected void onPostExecute(Map<Integer, String> result) {
+        	if (result.keySet().size() > 0) {
+        		foodNameAdaptor.clear();
+	            for (Integer key : result.keySet()) {
+	            	foodNameAdaptor.add(new PairedIdName(key, result.get(key)));
+	            }
+	            foodNameAdaptor.notifyDataSetChanged();
+            }
+        }
+    }
+    
+    private class SubmitReviewListener implements OnClickListener {
+		@Override
+		public void onClick(View v) {
+			new PostReviewTask().execute();
+		}
+    }
+    
+    private class PostReviewTask extends AsyncTask<Void, Void, Void> {
+		@Override
+		protected Void doInBackground(Void... params) {
+			// Create a new HttpClient and Post Header
+		    // TODO (ahenry): hard coded URL
+		    HttpClient httpClient = new DefaultHttpClient();  
+	        String postURL = "http://192.168.1.104:8080/yummie/api/v1/yummie/reviews/add";
+	        HttpPost httpPost = new HttpPost(postURL);
+		    
+		    try {
+		    	List<NameValuePair> postParams = new ArrayList<NameValuePair>();
+		    	postParams.add(new BasicNameValuePair("restaurantId", "" + restaurantId));
+		    	postParams.add(new BasicNameValuePair("foodId", "" + foodId));
+		    	postParams.add(new BasicNameValuePair("rating", "" + ratingBar.getRating()));
+		    	postParams.add(new BasicNameValuePair("comment", comment.getText().toString()));
+			    if (imageLocation != null && !imageLocation.equals("")) {
+				    File imageFile = new File(imageLocation);
+				    String imageKey = UUID.randomUUID().toString();
+				    S3ImageUtil.uploadImage(imageKey, imageFile);
+			    	postParams.add(new BasicNameValuePair("s3ImageKey", imageKey));
+			    }
+	            UrlEncodedFormEntity entity = new UrlEncodedFormEntity(postParams, HTTP.UTF_8);
+	            httpPost.setEntity(entity);	            
+	            HttpResponse responsePOST = httpClient.execute(httpPost);
+	            Log.i(null, "Post submitted" + responsePOST.getStatusLine());
+		    } catch (ClientProtocolException e) {
+		    	Log.e("", e.toString());
+		    } catch (IOException e) {
+		    	Log.e("", e.toString());
+		    }
+		    return null;
+		}
+    }
+    
+    private class PairedIdName {
+    	private int id;
+    	private String name;
+    	
+    	public PairedIdName(int id, String name) {
+    		this.id = id;
+    		this.name = name;
+		}
+    	
+    	@Override
+    	public String toString() {
+			return name;
+    	}
+    	
+    }
+
+	@Override
+	public void onSuccesfulLogIn() {
+        setContentView(R.layout.add_review);
+        restaurantName = (AutoCompleteTextView)findViewById(R.id.restaurantName);
+        restaurantNameAdaptor = new ArrayAdapter<PairedIdName>(this, R.layout.autocomplete_list_item);
+        restaurantName.setAdapter(restaurantNameAdaptor);
+        restaurantName.addTextChangedListener(new TextWatcher() {
+			@Override
+			public void onTextChanged(CharSequence s, int start, int before, int count) {
+				if (s.length() > 2) {
+					for (int i = 0; i < restaurantNameAdaptor.getCount(); i++) {
+						if (restaurantNameAdaptor.getItem(i).name.toLowerCase()
+								.contains(s.toString().toLowerCase())) {
+							return;
+						}
+					}
+					new UpdateRestaurantNameSuggestions().execute(s.toString());
+				}
+			}
+			
+			@Override
+			public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+			
+			@Override
+			public void afterTextChanged(Editable s) { }
+		});
+        
+        restaurantName.setOnItemClickListener(
+        		new OnItemClickListener() {
+					@Override
+					public void onItemClick(AdapterView parent, View v, int position, long id) {
+						restaurantId = restaurantNameAdaptor.getItem(position).id;
+						Log.i("Autocompleteselect", "Selected restaurant: " + restaurantId);
+						new UpdateFoodNameSuggestions().execute(restaurantId);
+					}
+				});
+        
+        foodName = (AutoCompleteTextView)findViewById(R.id.foodName);
+        foodNameAdaptor = new ArrayAdapter<PairedIdName>(this, R.layout.autocomplete_list_item);
+        foodName.setAdapter(foodNameAdaptor);
+        foodName.setOnItemClickListener(
+        		new OnItemClickListener() {
+					@Override
+					public void onItemClick(AdapterView parent, View v, int position, long id) {
+						foodId = foodNameAdaptor.getItem(position).id;
+						Log.i("Autocompleteselect", "Selected food: " + foodId);
+					}
+				});
+        
+        foodImage = (ImageButton)findViewById(R.id.foodImage);
+        foodImage.setOnClickListener(new OnClickListener() {
+			
+			@Override
+			public void onClick(View v) {
+				invokeCamera();
+			}
+		});
+        ratingBar = (RatingBar)findViewById(R.id.ratingBar);
+        comment = (EditText)findViewById(R.id.comment);
+        submitReviewListener = new SubmitReviewListener();
+        submitBottomButton = (Button)findViewById(R.id.submitBottomButton);
+        submitBottomButton.setOnClickListener(submitReviewListener);
+        
+        Button logoutButton = (Button) findViewById(R.id.logoutButton);
+        logoutButton.setOnClickListener(new OnClickListener() {
+			@Override
+			public void onClick(View v) {
+				FacebookConnector connector = new FacebookConnector(AddReview.this, getApplicationContext(), new String[0]);
+				try {
+					connector.getFacebook().logout(getApplicationContext());
+					startActivity(getIntent()); 
+					finish();
+				} catch (MalformedURLException e) {
+					e.printStackTrace();
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+			}
+		});
+	}
+}
