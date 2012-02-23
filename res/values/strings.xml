@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <string name="hello">Hello World, HmAndroidActivity!</string>
+    <string name="app_name">HmAndroid</string>
+    <string name="dialog_text">Launch Camera</string>
+    <string name="cancel">Cancel</string>
+
+</resources>
